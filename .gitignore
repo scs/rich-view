@@ -1,0 +1,6 @@
+*.[oa]
+inc
+lib
+doc
+gdb
+.settings
