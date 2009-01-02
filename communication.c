@@ -21,200 +21,357 @@
  */
 
 #include "communication.h"
+#include "version.h"
 
-const int NOTIMEOUT = 0xFFFFFFFF;
+/*********************************************************************//*!
+ * @brief Send a data buffer over the specified socket (blocking).
+ * 
+ * @param sock Socket to send the data over.
+ * @param pBuf Pointer to the data to be sent.
+ * @param len Length of the data buffer to be sent.
+ * @return SUCCESS or a suitable error code.
+ *//*********************************************************************/
+static OSC_ERR Comm_SendData(int sock, const void *pBuf, uint32 len);
 
-void fatalerror(char *st)
-{
-	perror(st);
-	exit(-1);
-}
+/*********************************************************************//*!
+ * @brief Gets a new message from the command socket.
+ *
+ * Attempts to get a new command message from the socket. 
+ *
+ * @param pComm Pointer to the communication status structure.
+ * @param timeout_ms Timeout of this function in milliseconds
+ * @return Length of the command message on success, 0 on timeout,
+ *         negative number on error.
+ *//*********************************************************************/
+static int Comm_GetCmdMsg(struct COMM *pComm, int timeout_ms);
 
-int min(int a, int b)
-{
-	if (a < b)
-	{
-		return a;
-	}
-	return b;
-}
+/*********************************************************************//*!
+ * @brief Initialize a socket according to the requirements of the
+ *        host-target protocol.
+ *
+ * Gets a socket number, sets socket options, calls bind and listen on
+ * the socket. Incoming connections have to be accepted in a different
+ * function.
+ * @see Comm_AcceptConnections
+ * 
+ * @param pSock Pointer to the socket to be created and initialized.
+ * @param port Port number the socket should be bound to.
+ * @return SUCCESS or an appropriate error code.
+ *//*********************************************************************/
+static OSC_ERR Comm_InitSocket(int *pSock, int port);
 
-void mstimer_start(double *starttime)
-{
-	struct timeval t;
-	gettimeofday(&t, NULL);
-	*starttime = t.tv_sec + t.tv_usec/1000000.0;
-}
+/*********************************************************************//*!
+ * @brief Sends a reply to a received command.
+ *
+ * If the socket is not connected, a call to this function with -ETRY_AGAIN
+ *
+ * @param pComm Pointer to the communication status structure.
+ * @return SUCCESS or a suitable error code.
+ *//*********************************************************************/
+static OSC_ERR Comm_SendReply(struct COMM *pComm);
 
-int mstimeup(double starttime, int milliseconds)
-{
-	struct timeval t;
-	double stoptime;
 
-	gettimeofday(&t, NULL);
-	stoptime = t.tv_sec + t.tv_usec/1000000.0;
 
-	return (stoptime-starttime) >= milliseconds/1000.0;
-}
 
-void udp_print_pkt( struct UdpCmdPacket *p)
+void Comm_PrintMsg(const struct CommMsg *pMsg)
 {
 	int i;
+	const struct MsgHdr *pHdr = &pMsg->hdr;
 
-	memcpy(&i, &p->data[0],sizeof(i));
+	OscLog(DEBUG, "Msg Start.\n");
 
-	OscLog(DEBUG, "Type      = %#x\n", p->cmd);
-	OscLog(DEBUG, "data[0]   = %#x\n", (char)p->data[0]);
-	OscLog(DEBUG, "data[1]   = %#x\n", (char)p->data[1]);
-	OscLog(DEBUG, "data[2]   = %#x\n", (char)p->data[2]);
-	OscLog(DEBUG, "data[3]   = %#x\n", (char)p->data[3]);
-	OscLog(DEBUG, "data[0-3] = %#x\n", i);
+	OscLog(DEBUG, "Body Len  = %d\n", pHdr->bodyLength);
+	OscLog(DEBUG, "Type      = %#x\n", pHdr->msgType);
+	OscLog(DEBUG, "Ident     = %#x\n", pHdr->ident);
+	OscLog(DEBUG, "status    = %#x\n", pHdr->status);
+	OscLog(DEBUG, "param0    = %#x\n", pHdr->msgParams.genericParams.param0);
+	OscLog(DEBUG, "param1    = %#x\n", pHdr->msgParams.genericParams.param1);
+	OscLog(DEBUG, "param2    = %#x\n", pHdr->msgParams.genericParams.param2);
+	OscLog(DEBUG, "param3    = %#x\n", pHdr->msgParams.genericParams.param3);
+
+	OscLog(DEBUG, "\nData:\n");
+	for(i = 0; i < pHdr->bodyLength; i++)
+	{
+		OscLog(DEBUG, "%#x ", pMsg->body[i]);
+		if(i % 32 == 31)
+		{
+			OscLog(DEBUG, "\n");
+		}
+	}
+	OscLog(DEBUG, "\nMsg End.\n", i);
 }
 
 
-int udp_settxbufsize(int sock, int size)
+OSC_ERR Comm_AcceptConnections(struct COMM *pComm, int timeout_ms)
 {
-	int retval;
-	int is_size;
-	socklen_t len=sizeof(size);
+  int retval;
+  fd_set s;
+  struct timeval timeout;
 
-	retval = setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (char *)&size,
-				(int)sizeof(size));
-	if (retval==SOCK_ERROR) fatalerror("setsockopt SO_SNDBUF");
-	retval = getsockopt(sock, SOL_SOCKET, SO_SNDBUF, (char *)&is_size, &len);
+  if(pComm->connCmdSock > 0 && pComm->connFeedSock > 0)
+  {
+	  /* Connection on both sockets already established. */
+	  return 0;
+  }
 
-	if (retval==SOCK_ERROR) fatalerror("getsockopt");
-	OscLog(DEBUG, "udp_settxbufsizes(): sendbufsize = %i\n", is_size);
+  FD_ZERO(&s);
+  FD_SET(pComm->cmdSock, &s);
+  FD_SET(pComm->feedSock, &s);
 
-	return size;
+  timeout.tv_sec = timeout_ms/1000;
+  timeout.tv_usec = (timeout_ms % 1000)*1000;
+
+  retval = select(MAX(pComm->cmdSock, pComm->feedSock)+1, /* Highest socket number + 1 */
+		  &s,   /* File descriptor set to monitor for reading and new connections. */
+		  NULL, /* File descriptor set to monitor for writing. */
+		  NULL, /* File descriptor set to monitor for exceptions. */
+		  &timeout);
+  if(retval > 0)
+  {
+	  /* Success. We have something new. */
+	  if(FD_ISSET(pComm->cmdSock, &s) && pComm->connCmdSock < 0)
+	  {
+		  pComm->connCmdSock = accept(pComm->cmdSock, NULL, 0);
+		  if(pComm->connCmdSock < 0)
+		  {
+			  OscLog(ERROR, "%s: Command socket accept error (%s)!\n",
+				 __func__, strerror(errno));
+		  }
+	  }
+
+	  if(FD_ISSET(pComm->feedSock, &s) && pComm->connFeedSock < 0)
+	  {
+		  pComm->connFeedSock = accept(pComm->feedSock, NULL, 0);
+		  if(pComm->connFeedSock < 0)
+		  {
+			  OscLog(ERROR, "%s: Feed socket accept error (%s)!\n",
+				 __func__, strerror(errno));
+		  }
+	  }
+	  return 0;
+  } else if(retval < 0) {
+	  OscLog(ERROR, "%s: Select failed (%s)!\n", __func__, strerror(errno));
+	  return -EDEVICE;
+  } else {
+	  /* Timeout */
+	  return -ETIMEOUT;
+  }
+		  
+		  
+}
+
+static int Comm_GetCmdMsg(struct COMM *pComm, int timeout_ms)
+{
+  int retval;
+  fd_set s;
+  struct timeval timeout;
+
+  if(pComm->connCmdSock <= 0)
+  {
+	  OscLog(DEBUG, "%s: Socket not connected.\n", __func__);
+	  return 0;
+  }
+
+  FD_ZERO(&s);
+  FD_SET(pComm->connCmdSock, &s);
+
+  timeout.tv_sec = timeout_ms/1000;
+  timeout.tv_usec = (timeout_ms % 1000)*1000;
+
+  retval = select(pComm->connCmdSock + 1, /* Highest socket number + 1 */
+		  &s,   /* File descriptor set to monitor for reading and new connections. */
+		  NULL, /* File descriptor set to monitor for writing. */
+		  NULL, /* File descriptor set to monitor for exceptions. */
+		  &timeout);
+  if(retval > 0)
+  {
+	  /* Success. We have a new command. */
+	  retval = recv(pComm->connCmdSock,
+			&pComm->cmdMsg,
+			sizeof(struct CommMsg),
+			0);
+	  return retval;
+  } else if(retval < 0) {
+	  OscLog(ERROR, "%s: Select failed (%s)!\n", __func__, strerror(errno));
+	  return -1;
+  } else {
+	  /* Timeout */
+	  return 0;
+  }
+}
+
+static OSC_ERR Comm_SendReply(struct COMM *pComm)
+{
+	if(pComm->connCmdSock <= 0)
+	{
+		OscLog(DEBUG, "%s: Socket not connected.\n", __func__);
+		return -ETRY_AGAIN;
+	}
+
+
+	/* Send reply message. */
+	return Comm_SendData(pComm->connCmdSock, 
+			     &pComm->cmdMsg, 
+			     sizeof(struct MsgHdr) + pComm->cmdMsg.hdr.bodyLength);
+}
+
+OSC_ERR Comm_HandleCommands(struct COMM *pComm, void *pHsm, uint32 timeout_ms)
+{
+	OSC_ERR err;
+	struct MsgHdr *pHdr;
+	int reg;
+	struct CBP_PARAM* pParam;
+
+	err = Comm_GetCmdMsg(pComm, timeout_ms);
+	if(err != SUCCESS)
+	{
+		return err;
+	}
+
+	pHdr = &pComm->cmdMsg.hdr;
+	switch(pHdr->msgType)
+	{
+	case MSG_CMD_GET_VER:
+		/* Can be handled without invoking the state machine. */
+		pHdr->msgParams.getVerReply.CBPVersion = CBP_VERSION;
+		pHdr->msgParams.getVerReply.FeedProtVersion = FEED_VERSION;
+		pHdr->msgParams.getVerReply.TargetSWVersion = 
+			VERSION_MAJOR << 16 | VERSION_MINOR << 8 | VERSION_PATCH;
+
+		pHdr->bodyLength = 0;
+		pHdr->status = STATUS_REPLY_SUCC;
+
+		return Comm_SendReply(pComm);
+	case MSG_CMD_GET_COMPL_CONFIG:
+		/* Can be handled without invoking the state machine. */
+		pHdr->bodyLength = pComm->nRegs * sizeof(struct CBP_PARAM);
+
+		assert(pHdr->bodyLength <= MAX_MSG_BODY_LENGTH);
+		memcpy(pComm->cmdMsg.body, pComm->pRegFile, pHdr->bodyLength);
+
+		pHdr->status = STATUS_REPLY_SUCC;
+
+		return Comm_SendReply(pComm);
+	case MSG_CMD_SET_CONFIG:
+		/* Invoke the state machine for all assigned config registers.
+		   Do not change the contents of the register file here, this will
+		   be done by the state machine. */
+		pParam = (struct CBP_PARAM*)&pComm->cmdMsg;
+		for(reg = 0; reg < pComm->nRegs; reg++)
+		{
+			pComm->enReqState = REQ_STATE_IDLE;
+			err = SetConfigRegister(pHsm, pParam);
+			pParam++;
+
+			if(err != SUCCESS)
+			{
+				goto set_config_fail;
+			}
+		}					
+		pHdr->status = STATUS_REPLY_SUCC;
+		return Comm_SendReply(pComm);
+
+set_config_fail:  
+		pHdr->status = STATUS_REPLY_FAIL;
+		return Comm_SendReply(pComm);
+	default:
+		OscLog(ERROR, "%s: Unsupported message type (%#x) received!\n",
+		       __func__);
+	}
+	return SUCCESS;
 }
 
 
-
-int udp_setrxbufsize(int sock, int size)
+OSC_ERR Comm_SendImage(struct COMM *pComm, const void* pImg, uint32 imgSize, const struct FeedHdr *pFeedHdr)
 {
-	int retval;
-	int is_size;
-	socklen_t len=sizeof(size);
+	OSC_ERR err;
+	struct MsgHdr msgHdr;
 
-	retval = setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (char *)&size,
-				(int)sizeof(size));
-	if (retval==SOCK_ERROR) fatalerror("setsockopt SO_RCVBUF");
-	retval = getsockopt(sock, SOL_SOCKET, SO_RCVBUF, (char *)&is_size, &len);
+	if(pComm->connFeedSock <= 0)
+	{
+		OscLog(DEBUG, "%s: Socket not connected.\n", __func__);
+		return -ETRY_AGAIN;
+	}
 
-	if (retval==SOCK_ERROR) fatalerror("getsockopt");
-	OscLog(DEBUG, "%s: rcvbufsize = %i\n", __func__, is_size);
+	msgHdr.bodyLength = sizeof(struct FeedHdr) + imgSize;
+	msgHdr.msgType = MSG_FEED_DATA;
+	msgHdr.ident = 0;
+	msgHdr.status = STATUS_FEED;
+	
+	memset(&msgHdr.msgParams.feedDataParams, 0, sizeof(msgHdr.msgParams.feedDataParams));
 
-	return size;
+	/* Send message header. */
+	err = Comm_SendData(pComm->connFeedSock, &msgHdr, sizeof(struct MsgHdr));
+	if(err != SUCCESS)
+	{
+		return err;
+	}
+
+	/* Send feed header. */
+	Comm_SendData(pComm->connFeedSock, pFeedHdr, sizeof(struct FeedHdr));
+	if(err != SUCCESS)
+	{
+		return err;
+	}
+
+	/* Sendi mage pComm-> */
+	Comm_SendData(pComm->connFeedSock, pImg, imgSize);
+	if(err != SUCCESS)
+	{
+		return err;
+	}
+
+	return SUCCESS;
 }
 
-
-int udp_init(int sock, int port)
+static OSC_ERR Comm_SendData(int sock, const void *pBuf, uint32 len)
 {
 	int retval;
+	uint8 *pTemp = (uint8*)pBuf;
+	uint32 bytesToSend = len;
+
+	while(len > 0)
+	{
+		retval = send(sock, pTemp, bytesToSend, 0);
+		if(retval < 0)
+		{
+			OscLog(ERROR, "%s: Send error (%s)!\n", 
+			       __func__, strerror(errno));
+			return -EDEVICE;
+		}
+		bytesToSend -= retval;
+		pTemp += retval;
+	}
+	return SUCCESS;
+}
+
+static OSC_ERR Comm_InitSocket(int *pSock, int port)
+{
+	int sock, retval, on;
 	struct sockaddr_in addr;
 
-	if (sock >= 0)
+	if(*pSock > 0)
 	{
-		fatalerror("udp_init: UDP already initialized");
+		return -EALREADY_INITIALIZED;
 	}
 
-	sock=socket(PF_INET, SOCK_DGRAM, 0);
-	if (sock==SOCK_ERROR)
-	{
-		fatalerror("udp_init: Could not get socket");
-	}
-
-	if (port == UdpCmdPort)
-	{
-		udp_settxbufsize(sock, BSIZE);		/* use large buffer also for cmd-port !!! */
-		udp_setrxbufsize(sock, BSIZE);
-	}
-	else
-	{
-		udp_settxbufsize(sock, BSIZE);		/* 1 entire image plus line numbers for data port */
-		udp_setrxbufsize(sock, BSIZE);
-	}
-
-	memset(&addr, 0, sizeof(addr));
-	addr.sin_family = AF_INET;
-	addr.sin_port = htons(port);
-
-	retval = bind(sock, (struct sockaddr *)&addr, sizeof(addr));
-	if (retval==SOCK_ERROR)
-	{
-		fatalerror("udp_init: Could not bind socket");
-	}
-	return (sock);
-}
-
-
-int udp_close(int sock)
-{
+	/* Initialize command socket. */
+	sock = socket(PF_INET, SOCK_STREAM, 0);
 	if (sock < 0)
 	{
-		fatalerror("udp_close: Socket not initialized");
-	}
-	close(sock);
-	return 0;
-}
+		OscLog(ERROR, "%s: Could not get socket!\n", __func__);
+		return -EDEVICE;
+	}	
 
-
-int udp_getcmd(struct UdpCmdPacket *pkt, int timeout_ms, int sock, struct sockaddr_in *fromaddr)
-{
-	struct sockaddr_in FromAddr;
-	int    retval;
-	fd_set s;
-	struct timeval timeout;
-	socklen_t    addrlen=sizeof(struct sockaddr_in);
-
-	if (fromaddr==NULL)
-	{
-		fromaddr = &FromAddr;
-	}
-
-	FD_ZERO(&s);
-	FD_SET(sock, &s);
-	timeout.tv_sec = timeout_ms/1000;
-	timeout.tv_usec = (timeout_ms % 1000)*1000;
-	retval = select(sock+1, &s, NULL, NULL, &timeout);
-	if (retval > 0)
-	{
-		retval = recvfrom(sock, pkt, BSIZE, 0, (struct sockaddr *)fromaddr, &addrlen);
-	}
-	else
-	{
-		return -1;
-	}
-
-	OscLog(DEBUG, "%s: Received %i bytes\n", __func__, retval);
-	udp_print_pkt(pkt);
-	return retval;
-}
-
-
-int tcp_init(int sock, int port)
-{
-	int retval, on;
-	struct sockaddr_in addr;
-
-	if (sock >= 0)
-	{
-		fatalerror("tcp_init: TCP already initialized");
-	}
-
-	sock = socket(PF_INET, SOCK_STREAM, 0);
-	if (sock==-1)
-	{
-		fatalerror("tcp_init: Could not get TCP socket");
-	}
-
-	/* Enable address reuse, because Linux sends TCP-FIN and Windows uses TCP-RST, so Windows does not close connection correctly on close(sock) */
+	/* Enable address reuse, because Linux sends TCP-FIN and Windows 
+	   uses TCP-RST, so Windows does not close connection correctly 
+	   on close(sock) */
 	on = 1;
 	retval = setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
 	if (retval==-1)
 	{
 		OscLog(ERROR, "%s: could not set socket-option SO_REUSEADDR", __func__);
+		return -EDEVICE;
 	}
 
 	memset(&addr, 0, sizeof(addr));
@@ -225,59 +382,77 @@ int tcp_init(int sock, int port)
 	retval = bind(sock, (struct sockaddr *)&addr, sizeof(addr));
 	if (retval==-1)
 	{
-		fatalerror("tcp_init: could not bind socket");
+		OscLog(ERROR, "%s: could not bind socket (%s)!", 
+		       __func__, strerror(errno));
+		return -EDEVICE;
 	}
-	return (sock);
+
+	retval = listen(sock, 1);
+	if(retval == -1)
+	  {
+	    OscLog(ERROR, "%s: Unable to listen to socket (%s)!\n",
+		   __func__, strerror(errno));	    
+	    return -EDEVICE;
+	  }
+
+	*pSock = sock;
+
+	return SUCCESS;
 }
 
-
-void tcp_close(int sock)
+OSC_ERR Comm_Init(struct COMM *pComm)
 {
-	close(sock);
+	OSC_ERR err;
+
+	if (pComm->cmdSock > 0 || pComm->feedSock > 0)
+	{
+		return -EALREADY_INITIALIZED;
+	}
+
+
+	/* Initialize command socket. */
+	err = Comm_InitSocket(&pComm->cmdSock, TCP_CMD_PORT);
+	if(err != SUCCESS && err != -EALREADY_INITIALIZED)
+	{
+		return err;
+	}
+
+	/* Initialize feed socket. */
+	err = Comm_InitSocket(&pComm->feedSock, TCP_FEED_PORT);
+	if(err != SUCCESS && err != -EALREADY_INITIALIZED)
+	{
+		Comm_DeInit(pComm);
+		return err;
+	}
+
+	return SUCCESS;
 }
 
 
-int tcp_getconnection(int sock)
+void Comm_DeInit(struct COMM *pComm)
 {
-	int csock;
-
-	if (listen(sock, 1)==-1)
+	if(pComm->connCmdSock > 0)
 	{
-		fatalerror("could not listen");
+		close(pComm->connCmdSock);
+		pComm->connCmdSock = -1;
 	}
-
-	csock = accept(sock, NULL, 0);
-	if (csock == -1)
+	if(pComm->connFeedSock > 0)
 	{
-		fatalerror("accept error");
+		close(pComm->connFeedSock);
+		pComm->connFeedSock = -1;
 	}
-
-	return csock;
+	if(pComm->cmdSock > 0)
+	{
+		close(pComm->cmdSock);
+		pComm->cmdSock = -1;
+	}
+	if(pComm->feedSock > 0)
+	{
+		close(pComm->feedSock);
+		pComm->feedSock = -1;
+	}
 }
 
-
-int tcp_senddata (int csock, uint8* pbuf, int size)
-{
-	uint8 *tmpbuf;
-	int retval, len;
-	int bytessent = 0;
-
-	tmpbuf = pbuf;		/* get base addr. of buffer */
-	len = size;			/* get entire size in bytes */
-	while (len > 0)
-	{
-		retval = send(csock, tmpbuf, len, 0);
-		if (retval<0)
-		{
-			perror("tcp_senddata: send error\n");
-			return -1;
-		}
-		len -= retval;				/* remaining length */
-		tmpbuf += retval;			/* buffer offset */
-		bytessent += retval;		/* total bytes sent */
-	}
-	return bytessent;
-}
 
 
 

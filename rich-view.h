@@ -46,6 +46,12 @@
 /*! @brief Timeout (ms) when waiting for a new picture. */
 #define CAMERA_TIMEOUT 1
 
+/*! @brief Timeout (ms) when waiting for new connections. */
+#define ACCEPT_CONNS_TIMEOUT 1
+
+/*! @brief Timeout (ms) when waiting for new commands. */
+#define GET_CMDS_TIMEOUT 1
+
 /*! @brief defines the timeout for CMOS sensor */
 #define TIMEOUT 100
 /*! @brief defines the time constant for time-outs (CPU speed dependent) */
@@ -91,49 +97,68 @@
 /*! @brief Image size in pixels: width * height */
 #define IMAGE_AERA (OSC_CAM_MAX_IMAGE_WIDTH*OSC_CAM_MAX_IMAGE_HEIGHT)
 
+
+/*-------- Configuration parameters stored register-like form -------*/
+
+/*! @brief Register ID for the acquisition mode. */
+#define REG_ID_AQUISITION_MODE	0
+/*! @brief Register ID for the trigger mode. */
+#define REG_ID_TRIGGER_MODE	1
+/*! @brief Register id for the exposure time. */
+#define REG_ID_EXP_TIME		2
+/*! @brief Register ID for the MAC address. */
+#define REG_ID_MAC_ADDR		4
+/*! @brief Register ID for the exposure delay. */
+#define REG_ID_EXP_DELAY	5
+/*! @brief A write to this register stores the exposure delay at the
+  current position. */
+#define REG_ID_STORE_CUR_EXP_DELAY 6
+
+/*! @brief The supported trigger modes. */
+enum EnTriggerMode
+{
+	TRIG_MODE_INTERNAL,
+	TRIG_MODE_EXTERNAL
+};
+
+extern struct CBP_PARAM regfile[];
+
 /*------------------- Main data object and members ------------------*/
 
 /*! @brief The structure storing all important variables of the application.
  * */
 struct DATA
 {
-  /*! @brief The frame buffers for the frame capture device driver.*/
-  uint8 u8FrameBuffers[NR_FRAME_BUFFERS][OSC_CAM_MAX_IMAGE_HEIGHT*OSC_CAM_MAX_IMAGE_WIDTH];
-  /*! @brief A buffer to hold the resulting color image. */
-  uint8 u8ResultImage[3*OSC_CAM_MAX_IMAGE_WIDTH*OSC_CAM_MAX_IMAGE_HEIGHT];
+	/*! @brief The frame buffers for the frame capture device driver.*/
+	uint8 u8FrameBuffers[NR_FRAME_BUFFERS][OSC_CAM_MAX_IMAGE_HEIGHT*OSC_CAM_MAX_IMAGE_WIDTH];
+	/*! @brief A buffer to hold the resulting color image. */
+	uint8 u8ResultImage[3*OSC_CAM_MAX_IMAGE_WIDTH*OSC_CAM_MAX_IMAGE_HEIGHT];
 
-  /*! @brief The last raw image captured. Always points to one of the frame
-   * buffers. */
-  uint8* pCurRawImg;
+	/*! @brief The last raw image captured. Always points to one of the frame
+	 * buffers. */
+	uint8* pCurRawImg;
 	
-  /*! @brief Handle to the framework instance. */
-  void *hFramework;
+	/*! @brief Handle to the framework instance. */
+	void *hFramework;
 	
-  /*! @brief Handle to the configuration file */
-  CFG_FILE_CONTENT_HANDLE hConfig;	
+	/*! @brief Handle to the configuration file */
+	CFG_FILE_CONTENT_HANDLE hConfig;	
     
-  /*! Firmware revision number */
-  uint8 firmwareRevision;
+	/*! Firmware revision number */
+	uint8 firmwareRevision;
 
-  /*! @brief Camera-Scene perspective */
-  enum EnOscCamPerspective perspective;
+	/*! @brief Camera-Scene perspective */
+	enum EnOscCamPerspective perspective;
 #ifdef HAS_CPLD		
-  /*! @brief Fine clock delay value. */
-  uint8 exposureDelay;
+	/*! @brief Fine clock delay value. */
+	uint8 exposureDelay;
 #endif /* HAS_CPLD */
-  /*! @brief Exposure time [us] */
-  uint32 exposureTime;	
+	/*! @brief Exposure time [us] */
+	uint32 exposureTime;	
+	enum EnTriggerMode enTriggerMode;
   
-		
-  /*! @brief Socket for incomming UDP command packets */
-  int cmdsock;						
-  /*! @brief Socket for outgoing TCP data packets */
-  int datasock;						
-  /*! @brief Socket for outgoing TCP after connection to host */
-  int connsock;	
-  /*! @brief Recent UDP command packet */
-  struct UdpCmdPacket cmdpkt;
-
+	/*! @brief Variables relevant for communication. */
+	struct COMM comm;
 };
 
 extern struct DATA data;
@@ -161,12 +186,6 @@ void Terminate();
  *//*********************************************************************/
 OSC_ERR StateControl(void);
 
-
-OSC_ERR StoreMac(void);
-OSC_ERR StoreIp(void);
-OSC_ERR StoreDelay(void);
-OSC_ERR StoreExposure(void);
-OSC_ERR StorePerspective(void);
 
 /*********************************************************************//*!
  * @brief Process a newly captured frame.

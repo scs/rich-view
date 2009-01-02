@@ -26,13 +26,13 @@
 #include "rich-view.h"
 
 enum MainStateEvents {
-	FRAMESEQ_EVT,       /* frame ready to process (before setting up next frame capture) */
-	FRAMEPAR_EVT,       /* frame ready to process (parallel to next capture) */
-	TRIGGER_EVT, /* Selftriggering event */ 
-	MODE_IDLE_EVT, 		/* Go to idle mode */
-	MODE_RUN_INTERN_EVT,/* Start capturing with internal trigger. */
-	MODE_RUN_EXTERN_EVT, /* Start capturing with externel trigger. */
-	APPLY_PARAMETER_EVT /* Apply UDP cmd parameter changes */
+	FRAMESEQ_EVT,		/* frame ready to process (before setting up next frame capture) */
+	FRAMEPAR_EVT,		/* frame ready to process (parallel to next capture) */
+	TRIGGER_EVT,		/* Selftriggering event */ 
+	CMD_GO_IDLE_EVT, 	/* Go to idle mode */
+	CMD_GO_ACQ_EVT,         /* Go to acquisition mode */
+	CMD_USE_INTERN_TRIGGER_EVT, /* Capture with internal trigger. */
+	CMD_USE_EXTERN_TRIGGER_EVT  /* Capture with external trigger. */
 };
 
 

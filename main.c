@@ -28,6 +28,20 @@
 #include <unistd.h>
 #include <stdlib.h>
 
+/*! @brief The "configuration register file" of this program. */
+struct CBP_PARAM regfile[] =
+{
+	{REG_ID_AQUISITION_MODE, 0}, /* Mode  
+					   0: Idle mode
+					   1: Acquisition mode.*/
+	{REG_ID_TRIGGER_MODE, 0},    /* Trigger mode
+					0: Internal triggering
+					1: External triggering */
+	{REG_ID_EXP_TIME, 15000},    /* Exposure time in us. */
+	{REG_ID_MAC_ADDR, 0},        /* MAC address. */
+	{REG_ID_EXP_DELAY, 1}        /* Exposure delay (indXcam only) */
+};
+       
 /*! @brief This stores all variables needed by the algorithm. */
 struct DATA data;
 
@@ -245,34 +259,22 @@ static OSC_ERR init(const int argc, const char * argv[])
 	}
 	
 	OscCamSetupPerspective( data.perspective);
-		
-	/* Init UDP socket (commands). */
-	data.cmdsock = udp_init(-1, UdpCmdPort);
-	if (data.cmdsock == -1)
-	{
-		OscLog(ERROR, "UDP socket init failed.\n");
-		goto udp_err;
-	}
 
-	/* Init TCP socket (data). */
-	data.datasock = tcp_init(-1, TcpDataPort);
-	if (data.datasock == -1)
+	/* Make the register file known to the communication protocol. */
+	data.comm.pRegFile = regfile;
+	data.comm.nRegs = (sizeof(regfile)/sizeof(struct CBP_PARAM));
+
+	/* Init communication sockets. */
+	err = Comm_Init(&data.comm);
+	if (err != SUCCESS)
 	{
-		OscLog(ERROR, "TCP socket init failed.\n");
-		goto tcp_err;		
+		OscLog(ERROR, "Communication initialization failed.\n");
+		goto comm_err;		
 	}	
-	
-	/* Establish TCP connection to GUI */
-	OscLog(INFO, "Waiting for connection to GUI ... ");
-	data.connsock = tcp_getconnection(data.datasock);
-	OscLog(INFO, "DONE\n");
 	
 	return SUCCESS;
 	
-tcp_err:
-	/* Close UDP socket (command). */
-	udp_close(data.cmdsock);					
-udp_err:    
+comm_err:    
 cfg_err:
 #ifdef HAS_CPLD	
 cpld_err:
@@ -295,13 +297,11 @@ OSC_ERR Unload()
 	
 	OscDestroy(data.hFramework);
 	
-	/* Close all sockets */
-	udp_close( data.cmdsock);		
-	tcp_close( data.connsock);
-	tcp_close( data.datasock);
-    
-    /* Clear global data fields. */
-    memset(&data, 0, sizeof(struct DATA));
+	/* Close all communication */
+	Comm_DeInit(&data.comm);
+
+	/* Clear global data fields. */
+	memset(&data, 0, sizeof(struct DATA));
     	
 	return SUCCESS;
 }
