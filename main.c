@@ -119,7 +119,7 @@ static OSC_ERR init(const int argc, const char * argv[])
 
     /* Set logging levels */
     OscLogSetConsoleLogLevel(INFO);
-    OscLogSetFileLogLevel(WARN);
+    OscLogSetFileLogLevel(DEBUG);
 
     /* Print framework version */
     OscGetVersionString( strVersion);    

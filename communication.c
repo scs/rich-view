@@ -26,12 +26,14 @@
 /*********************************************************************//*!
  * @brief Send a data buffer over the specified socket (blocking).
  * 
- * @param sock Socket to send the data over.
+ * On send error, this functions sets the supplied socket to 0.
+ * 
+ * @param pSock Pointer to socket to send the data over.
  * @param pBuf Pointer to the data to be sent.
  * @param len Length of the data buffer to be sent.
  * @return SUCCESS or a suitable error code.
  *//*********************************************************************/
-static OSC_ERR Comm_SendData(int sock, const void *pBuf, uint32 len);
+static OSC_ERR Comm_SendData(int* pSock, const void *pBuf, uint32 len);
 
 /*********************************************************************//*!
  * @brief Gets a new message from the command socket.
@@ -115,8 +117,16 @@ OSC_ERR Comm_AcceptConnections(struct COMM *pComm, int timeout_ms)
   }
 
   FD_ZERO(&s);
-  FD_SET(pComm->cmdSock, &s);
-  FD_SET(pComm->feedSock, &s);
+
+  if(pComm->connCmdSock <= 0)
+  {
+	  FD_SET(pComm->cmdSock, &s);
+  }
+
+  if(pComm->connFeedSock <= 0)
+  {
+	  FD_SET(pComm->feedSock, &s);
+  }
 
   timeout.tv_sec = timeout_ms/1000;
   timeout.tv_usec = (timeout_ms % 1000)*1000;
@@ -129,26 +139,30 @@ OSC_ERR Comm_AcceptConnections(struct COMM *pComm, int timeout_ms)
   if(retval > 0)
   {
 	  /* Success. We have something new. */
-	  if(FD_ISSET(pComm->cmdSock, &s) && pComm->connCmdSock < 0)
+	  if(FD_ISSET(pComm->cmdSock, &s))
 	  {
 		  pComm->connCmdSock = accept(pComm->cmdSock, NULL, 0);
 		  if(pComm->connCmdSock < 0)
 		  {
 			  OscLog(ERROR, "%s: Command socket accept error (%s)!\n",
 				 __func__, strerror(errno));
+			  return -EDEVICE;
 		  }
+		  OscLog(INFO, "%s: Command socket connected.\n", __func__);
 	  }
 
-	  if(FD_ISSET(pComm->feedSock, &s) && pComm->connFeedSock < 0)
+	  if(FD_ISSET(pComm->feedSock, &s))
 	  {
 		  pComm->connFeedSock = accept(pComm->feedSock, NULL, 0);
 		  if(pComm->connFeedSock < 0)
 		  {
 			  OscLog(ERROR, "%s: Feed socket accept error (%s)!\n",
 				 __func__, strerror(errno));
+			  return -EDEVICE;
 		  }
+		  OscLog(INFO, "%s: Feed socket connected.\n", __func__);
 	  }
-	  return 0;
+	  return SUCCESS;
   } else if(retval < 0) {
 	  OscLog(ERROR, "%s: Select failed (%s)!\n", __func__, strerror(errno));
 	  return -EDEVICE;
@@ -210,7 +224,7 @@ static OSC_ERR Comm_SendReply(struct COMM *pComm)
 
 
 	/* Send reply message. */
-	return Comm_SendData(pComm->connCmdSock, 
+	return Comm_SendData(&pComm->connCmdSock, 
 			     &pComm->cmdMsg, 
 			     sizeof(struct MsgHdr) + pComm->cmdMsg.hdr.bodyLength);
 }
@@ -218,14 +232,18 @@ static OSC_ERR Comm_SendReply(struct COMM *pComm)
 OSC_ERR Comm_HandleCommands(struct COMM *pComm, void *pHsm, uint32 timeout_ms)
 {
 	OSC_ERR err;
+	int bytesReceived;
 	struct MsgHdr *pHdr;
 	int reg;
 	struct CBP_PARAM* pParam;
 
-	err = Comm_GetCmdMsg(pComm, timeout_ms);
-	if(err != SUCCESS)
+	bytesReceived = Comm_GetCmdMsg(pComm, timeout_ms);
+	if(bytesReceived == 0)
 	{
-		return err;
+		return -ETIMEOUT;
+	} else if(bytesReceived < 0)
+	{
+		return -EDEVICE;
 	}
 
 	pHdr = &pComm->cmdMsg.hdr;
@@ -301,21 +319,21 @@ OSC_ERR Comm_SendImage(struct COMM *pComm, const void* pImg, uint32 imgSize, con
 	memset(&msgHdr.msgParams.feedDataParams, 0, sizeof(msgHdr.msgParams.feedDataParams));
 
 	/* Send message header. */
-	err = Comm_SendData(pComm->connFeedSock, &msgHdr, sizeof(struct MsgHdr));
+	err = Comm_SendData(&pComm->connFeedSock, &msgHdr, sizeof(struct MsgHdr));
 	if(err != SUCCESS)
 	{
 		return err;
 	}
 
 	/* Send feed header. */
-	Comm_SendData(pComm->connFeedSock, pFeedHdr, sizeof(struct FeedHdr));
+	Comm_SendData(&pComm->connFeedSock, pFeedHdr, sizeof(struct FeedHdr));
 	if(err != SUCCESS)
 	{
 		return err;
 	}
 
-	/* Sendi mage pComm-> */
-	Comm_SendData(pComm->connFeedSock, pImg, imgSize);
+	/* Send image data */
+	Comm_SendData(&pComm->connFeedSock, pImg, imgSize);
 	if(err != SUCCESS)
 	{
 		return err;
@@ -324,19 +342,20 @@ OSC_ERR Comm_SendImage(struct COMM *pComm, const void* pImg, uint32 imgSize, con
 	return SUCCESS;
 }
 
-static OSC_ERR Comm_SendData(int sock, const void *pBuf, uint32 len)
+static OSC_ERR Comm_SendData(int *pSock, const void *pBuf, uint32 len)
 {
 	int retval;
 	uint8 *pTemp = (uint8*)pBuf;
 	uint32 bytesToSend = len;
 
-	while(len > 0)
+	while(bytesToSend > 0)
 	{
-		retval = send(sock, pTemp, bytesToSend, 0);
+		retval = send(*pSock, pTemp, bytesToSend, 0);
 		if(retval < 0)
 		{
 			OscLog(ERROR, "%s: Send error (%s)!\n", 
 			       __func__, strerror(errno));
+			*pSock = 0;
 			return -EDEVICE;
 		}
 		bytesToSend -= retval;

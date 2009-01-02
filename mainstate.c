@@ -279,8 +279,8 @@ Msg const *MainState_top(MainState *me, Msg *msg)
 	switch (msg->evt)
 	{
 	case START_EVT:
-	  STATE_START(me, &me->idle);
-	  return 0;
+		STATE_START(me, &me->idle);
+		return 0;
 	}
 	return msg;
 }
@@ -492,14 +492,14 @@ OSC_ERR StateControl( void)
 		   *                            b) check for commands (and do process) 
 		   * 				c) check for available picture */
 			err = Comm_AcceptConnections(&data.comm, ACCEPT_CONNS_TIMEOUT);
-			if(err != SUCCESS && err != -ETRY_AGAIN)
+			if(err != SUCCESS && err != -ETIMEOUT)
 			{
 				OscLog(ERROR, "%s: Error accepting new connections (%d)!\n",
 				       __func__, err);
 			}
 
 			err = Comm_HandleCommands(&data.comm, &mainState, GET_CMDS_TIMEOUT);
-			if(err != SUCCESS && err != -ETRY_AGAIN)
+			if(err != SUCCESS && err != -ETIMEOUT)
 			{
 				OscLog(ERROR, "%s: Error handling commands (%d)!\n",
 				       __func__, err);
