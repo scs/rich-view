@@ -342,7 +342,7 @@ Msg const *MainState_idle(MainState *me, Msg *msg)
 Msg const *MainState_capture(MainState *me, Msg *msg)
 {
         OSC_ERR err;
-	void *pDummyImg = NULL;
+	uint8 *pDummyImg = NULL;
 	uint32 imgSize;
 
 	switch (msg->evt)
@@ -476,7 +476,7 @@ OSC_ERR StateControl( void)
 {
 	OSC_ERR err;
 	MainState mainState;
-	void *pCurRawImg = NULL;
+	uint8 *pCurRawImg = NULL;
 
 	/* Setup main state machine. Start with idle mode. */
 	MainStateConstruct(&mainState);
