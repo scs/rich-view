@@ -66,6 +66,14 @@ update_files() {
 	VERSION_MINOR=$3
 	VERSION_PATCH=$4
 	VERSION_RC=$5
+		
+	VERSION_FILE="version.h"
+	
+	sed -ri -e "s/(VERSION_MAJOR[\t ]+)[0-9]+/\1$VERSION_MAJOR/" "$VERSION_FILE"
+	sed -ri -e "s/(VERSION_MINOR[\t ]+)[0-9]+/\1$VERSION_MINOR/" "$VERSION_FILE"
+	sed -ri -e "s/(VERSION_PATCH[\t ]+)[0-9]+/\1$VERSION_PATCH/" "$VERSION_FILE"
+	
+	echo "$VERSION_FILE"
 }
 
 OPT_MAINTAIN_HISTORY_FILE=1
